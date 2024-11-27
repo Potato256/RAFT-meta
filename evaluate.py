@@ -103,7 +103,7 @@ def validate_meta(model, args, iters=24):
     cos_sim_list = []
 
 
-    val_dataset = datasets.MetaDataset(split='val')
+    val_dataset = datasets.MetaDataset(split='val', root=args.dataset)
 
     eval_loader = torch.utils.data.DataLoader(val_dataset, batch_size=args.batch_size, 
     pin_memory=False, shuffle=True, num_workers=4, drop_last=True)

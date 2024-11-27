@@ -93,12 +93,12 @@ def fetch_optimizer(args, model):
     
 
 class Logger:
-    def __init__(self, model, scheduler):
+    def __init__(self, model, scheduler, args):
         self.model = model
         self.scheduler = scheduler
         self.total_steps = 0
         self.running_loss = {}
-        self.writer = None
+        self.writer = SummaryWriter(f'runs/{args.name}')
 
     def _print_training_status(self):
         metrics_data = [self.running_loss[k]/SUM_FREQ for k in sorted(self.running_loss.keys())]
@@ -164,7 +164,7 @@ def train(args):
 
     total_steps = 0
     scaler = GradScaler(enabled=args.mixed_precision)
-    logger = Logger(model, scheduler)
+    logger = Logger(model, scheduler, args)
 
     VAL_FREQ = len(train_loader) // args.batch_size // 2
     add_noise = False
@@ -198,7 +198,7 @@ def train(args):
 
             logger.push(metrics)
 
-            if total_steps % VAL_FREQ == VAL_FREQ - 1:
+            if total_steps % VAL_FREQ == VAL_FREQ - 1 or True:
                 PATH = f'checkpoints/{args.name}/{total_steps+1}_{args.name}.pth'
                 torch.save(model.state_dict(), PATH)
 
