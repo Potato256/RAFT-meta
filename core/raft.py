@@ -59,6 +59,12 @@ class RAFT(nn.Module):
         for m in self.modules():
             if isinstance(m, nn.BatchNorm2d):
                 m.eval()
+    
+    def freeze_encoder(self):
+        for param in self.fnet.parameters():
+            param.requires_grad = False
+        for param in self.cnet.parameters():
+            param.requires_grad = False
 
     def initialize_flow(self, img):
         """ Flow is represented as difference between two coordinate grids flow = coords1 - coords0"""

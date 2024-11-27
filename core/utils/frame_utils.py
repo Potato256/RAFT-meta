@@ -120,6 +120,7 @@ def writeFlowKITTI(filename, uv):
     cv2.imwrite(filename, uv[..., ::-1])
     
 
+import h5py
 def read_gen(file_name, pil=False):
     ext = splitext(file_name)[-1]
     if ext == '.png' or ext == '.jpeg' or ext == '.ppm' or ext == '.jpg':
@@ -134,4 +135,7 @@ def read_gen(file_name, pil=False):
             return flow
         else:
             return flow[:, :, :-1]
+    elif ext == '.hdf5':
+        with h5py.File(file_name, 'r') as f:
+            return f[list(f.keys())[0]][:]
     return []

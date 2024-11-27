@@ -65,6 +65,7 @@ class FlowDataset(data.Dataset):
         img2 = np.array(img2).astype(np.uint8)
 
         # grayscale images
+        # print(img1.shape)
         if len(img1.shape) == 2:
             img1 = np.tile(img1[...,None], (1, 1, 3))
             img2 = np.tile(img2[...,None], (1, 1, 3))
@@ -131,7 +132,19 @@ class FlyingChairs(FlowDataset):
             xid = split_list[i]
             if (split=='training' and xid==1) or (split=='validation' and xid==2):
                 self.flow_list += [ flows[i] ]
-                self.image_list += [ [images[2*i], images[2*i+1]] ]
+                self.image_list += [ [images[2*i], images[2*i+1]] 
+                                    ]
+class MetaDataset(FlowDataset):
+    def __init__(self, aug_params=None, split='train', root='/home/lbx/code/metasurface-depth/hyperSim/hypersim-1k-clean-11_16'):
+        super(MetaDataset, self).__init__(aug_params)
+
+        images = sorted(glob(osp.join(root, split, 'sim-output', '*.png')))
+        flows =  sorted(glob(osp.join(root, split, 'disp-hdf5', '*.hdf5')))
+        assert (len(images)//2 == len(flows))
+
+        for i in range(len(flows)):
+            self.flow_list += [ flows[i] ]
+            self.image_list += [ [images[2*i], images[2*i+1]] ]
 
 
 class FlyingThings3D(FlowDataset):
@@ -227,6 +240,10 @@ def fetch_dataloader(args, TRAIN_DS='C+T+K+S+H'):
         aug_params = {'crop_size': args.image_size, 'min_scale': -0.2, 'max_scale': 0.4, 'do_flip': False}
         train_dataset = KITTI(aug_params, split='training')
 
+    elif args.stage == 'meta':
+        train_dataset = MetaDataset(aug_params=None, split='train', root=args.dataset)
+    
+    # print(args.batch_size)
     train_loader = data.DataLoader(train_dataset, batch_size=args.batch_size, 
         pin_memory=False, shuffle=True, num_workers=4, drop_last=True)
 

@@ -44,7 +44,9 @@ SUM_FREQ = 100
 VAL_FREQ = 5000
 
 
-def sequence_loss(flow_preds, flow_gt, valid, gamma=0.8, max_flow=MAX_FLOW):
+COS_SIM = nn.CosineSimilarity(dim=1, eps=1e-6)
+
+def sequence_loss(flow_preds, flow_gt, valid, gamma=0.8, max_flow=MAX_FLOW, l1_weight=1.0, cos_weight=0.0):
     """ Loss function defined over sequence of flow predictions """
 
     n_predictions = len(flow_preds)    
@@ -57,16 +59,20 @@ def sequence_loss(flow_preds, flow_gt, valid, gamma=0.8, max_flow=MAX_FLOW):
     for i in range(n_predictions):
         i_weight = gamma**(n_predictions - i - 1)
         i_loss = (flow_preds[i] - flow_gt).abs()
-        flow_loss += i_weight * (valid[:, None] * i_loss).mean()
-
+        flow_loss += l1_weight * i_weight * (valid[:, None] * i_loss).mean()
+        flow_loss += cos_weight * i_weight * (1 - COS_SIM(flow_preds[i], flow_gt).mean())
+        
     epe = torch.sum((flow_preds[-1] - flow_gt)**2, dim=1).sqrt()
     epe = epe.view(-1)[valid.view(-1)]
+
+    cos_similarity = COS_SIM(flow_preds[-1], flow_gt).mean()
 
     metrics = {
         'epe': epe.mean().item(),
         '1px': (epe < 1).float().mean().item(),
         '3px': (epe < 3).float().mean().item(),
         '5px': (epe < 5).float().mean().item(),
+        'cos_similarity': cos_similarity.item()
     }
 
     return flow_loss, metrics
@@ -141,10 +147,16 @@ def train(args):
     if args.restore_ckpt is not None:
         model.load_state_dict(torch.load(args.restore_ckpt), strict=False)
 
+    if args.fine_tune:
+        model.load_state_dict(torch.load(args.pretrained), strict=False)
+        print("Loaded pretrained model for fine-tuning")
+        model.module.freeze_encoder()
+        print("Freezed encoder")
+    
     model.cuda()
     model.train()
 
-    if args.stage != 'chairs':
+    if args.stage != 'chairs' and args.stage != 'meta':
         model.module.freeze_bn()
 
     train_loader = datasets.fetch_dataloader(args)
@@ -154,13 +166,14 @@ def train(args):
     scaler = GradScaler(enabled=args.mixed_precision)
     logger = Logger(model, scheduler)
 
-    VAL_FREQ = 5000
-    add_noise = True
+    VAL_FREQ = len(train_loader) // args.batch_size // 2
+    add_noise = False
 
     should_keep_training = True
+    import tqdm
     while should_keep_training:
 
-        for i_batch, data_blob in enumerate(train_loader):
+        for i_batch, data_blob in tqdm.tqdm(enumerate(train_loader)):
             optimizer.zero_grad()
             image1, image2, flow, valid = [x.cuda() for x in data_blob]
 
@@ -169,9 +182,12 @@ def train(args):
                 image1 = (image1 + stdv * torch.randn(*image1.shape).cuda()).clamp(0.0, 255.0)
                 image2 = (image2 + stdv * torch.randn(*image2.shape).cuda()).clamp(0.0, 255.0)
 
-            flow_predictions = model(image1, image2, iters=args.iters)            
+            # direction
+            # flow_predictions = model(image1, image2, iters=args.iters)            
+            flow_predictions = model(image2, image1, iters=args.iters)            
 
-            loss, metrics = sequence_loss(flow_predictions, flow, valid, args.gamma)
+
+            loss, metrics = sequence_loss(flow_predictions, flow, valid, gamma=args.gamma, cos_weight=args.cosine_loss_weight)
             scaler.scale(loss).backward()
             scaler.unscale_(optimizer)                
             torch.nn.utils.clip_grad_norm_(model.parameters(), args.clip)
@@ -183,7 +199,7 @@ def train(args):
             logger.push(metrics)
 
             if total_steps % VAL_FREQ == VAL_FREQ - 1:
-                PATH = 'checkpoints/%d_%s.pth' % (total_steps+1, args.name)
+                PATH = f'checkpoints/{args.name}/{total_steps+1}_{args.name}.pth'
                 torch.save(model.state_dict(), PATH)
 
                 results = {}
@@ -194,11 +210,13 @@ def train(args):
                         results.update(evaluate.validate_sintel(model.module))
                     elif val_dataset == 'kitti':
                         results.update(evaluate.validate_kitti(model.module))
+                    elif val_dataset == 'meta':
+                        results.update(evaluate.validate_meta(model.module, args))
 
                 logger.write_dict(results)
                 
                 model.train()
-                if args.stage != 'chairs':
+                if args.stage != 'chairs' and args.stage != 'meta':
                     model.module.freeze_bn()
             
             total_steps += 1
@@ -208,7 +226,7 @@ def train(args):
                 break
 
     logger.close()
-    PATH = 'checkpoints/%s.pth' % args.name
+    PATH = f'checkpoints/{args.name}/{args.name}.pth' 
     torch.save(model.state_dict(), PATH)
 
     return PATH
@@ -236,12 +254,20 @@ if __name__ == '__main__':
     parser.add_argument('--dropout', type=float, default=0.0)
     parser.add_argument('--gamma', type=float, default=0.8, help='exponential weighting')
     parser.add_argument('--add_noise', action='store_true')
+    parser.add_argument('--fine_tune', action='store_true')
+    parser.add_argument('--pretrained', type=str)
+    parser.add_argument('--dataset', type=str)
+    parser.add_argument('--eval_freq', type=int, default=4, help='evaluation frequency in one epoch')
+    parser.add_argument('--cosine_loss_weight', type=float, default=0.0)
+    parser.add_argument('--l1_loss_weight', type=float, default=1.0)
+
+    
     args = parser.parse_args()
 
     torch.manual_seed(1234)
     np.random.seed(1234)
 
-    if not os.path.isdir('checkpoints'):
-        os.mkdir('checkpoints')
+    if not os.path.isdir(f'checkpoints/{args.name}'):
+        os.mkdir(f'checkpoints/{args.name}')
 
     train(args)
