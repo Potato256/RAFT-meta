@@ -59,8 +59,6 @@ def validate_meta(model, args, iters=24):
     return {'val_epe': epe, 'val_cos_sim': cos_sim}
 
 
-
-
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--model', help="restore checkpoint")

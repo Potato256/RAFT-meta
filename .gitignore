@@ -9,3 +9,4 @@ correlation.egg-info
 runs
 checkpoints
 log
+wandb

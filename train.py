@@ -3,9 +3,7 @@ import sys
 sys.path.append('core')
 
 import argparse
-import os
-import cv2
-import time
+import os, cv2, time, tqdm
 import numpy as np
 import matplotlib.pyplot as plt
 
@@ -13,13 +11,12 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 import torch.nn.functional as F
-
 from torch.utils.data import DataLoader
+
 from raft import RAFT
 import evaluate
 import datasets
 
-from torch.utils.tensorboard import SummaryWriter
 import wandb
 
 try:
@@ -39,32 +36,23 @@ except:
             pass
 
 
-# exclude extremly large displacements
-MAX_FLOW = 400
 SUM_FREQ = 100
-VAL_FREQ = 5000
-
-
 COS_SIM = nn.CosineSimilarity(dim=1, eps=1e-6)
 
-def sequence_loss(flow_preds, flow_gt, valid, gamma=0.8, max_flow=MAX_FLOW, l1_weight=1.0, cos_weight=0.0):
+def sequence_loss(flow_preds, flow_gt, gamma=0.8, l1_weight=1.0, cos_weight=0.0):
     """ Loss function defined over sequence of flow predictions """
 
     n_predictions = len(flow_preds)    
     flow_loss = 0.0
 
-    # exlude invalid pixels and extremely large diplacements
-    mag = torch.sum(flow_gt**2, dim=1).sqrt()
-    valid = (valid >= 0.5) & (mag < max_flow)
-
     for i in range(n_predictions):
         i_weight = gamma**(n_predictions - i - 1)
         i_loss = (flow_preds[i] - flow_gt).abs()
-        flow_loss += l1_weight * i_weight * (valid[:, None] * i_loss).mean()
+        flow_loss += l1_weight * i_weight * i_loss.mean()
         flow_loss += cos_weight * i_weight * (1 - COS_SIM(flow_preds[i], flow_gt).mean())
         
     epe = torch.sum((flow_preds[-1] - flow_gt)**2, dim=1).sqrt()
-    epe = epe.view(-1)[valid.view(-1)]
+    epe = epe.view(-1)
 
     cos_similarity = COS_SIM(flow_preds[-1], flow_gt).mean()
 
@@ -82,7 +70,6 @@ def sequence_loss(flow_preds, flow_gt, valid, gamma=0.8, max_flow=MAX_FLOW, l1_w
 def count_parameters(model):
     return sum(p.numel() for p in model.parameters() if p.requires_grad)
 
-
 def fetch_optimizer(args, model):
     """ Create the optimizer and learning rate scheduler """
     optimizer = optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.wdecay, eps=args.epsilon)
@@ -91,7 +78,6 @@ def fetch_optimizer(args, model):
         pct_start=0.05, cycle_momentum=False, anneal_strategy='linear')
 
     return optimizer, scheduler
-    
 
 class Logger:
     def __init__(self, model, scheduler, args):
@@ -99,8 +85,9 @@ class Logger:
         self.scheduler = scheduler
         self.total_steps = 0
         self.running_loss = {}
-        self.writer = SummaryWriter(f'runs/{args.name}')
-
+        self.writer = wandb.init(project='raft-meta', name=args.name, resume='allow')
+        self.writer.config.update(args.__dict__)
+        
     def _print_training_status(self):
         metrics_data = [self.running_loss[k]/SUM_FREQ for k in sorted(self.running_loss.keys())]
         training_str = "[{:6d}, {:10.7f}] ".format(self.total_steps+1, self.scheduler.get_last_lr()[0])
@@ -109,11 +96,8 @@ class Logger:
         # print the training status
         print(training_str + metrics_str)
 
-        if self.writer is None:
-            self.writer = SummaryWriter()
-
         for k in self.running_loss:
-            self.writer.add_scalar(k, self.running_loss[k]/SUM_FREQ, self.total_steps)
+            self.writer.log({k: self.running_loss[k]/SUM_FREQ}, step=self.total_steps)
             self.running_loss[k] = 0.0
 
     def push(self, metrics):
@@ -125,19 +109,15 @@ class Logger:
 
             self.running_loss[key] += metrics[key]
 
-        if self.total_steps % SUM_FREQ == SUM_FREQ-1:
+        if self.total_steps % SUM_FREQ == 1:
             self._print_training_status()
             self.running_loss = {}
 
     def write_dict(self, results):
-        if self.writer is None:
-            self.writer = SummaryWriter()
-
-        for key in results:
-            self.writer.add_scalar(key, results[key], self.total_steps)
+        self.writer.log(results, step=self.total_steps)
 
     def close(self):
-        self.writer.close()
+        self.writer.finish()
 
 
 def train(args):
@@ -157,7 +137,7 @@ def train(args):
     model.cuda()
     model.train()
 
-    if args.stage != 'chairs' and args.stage != 'meta':
+    if args.stage != 'meta':
         model.module.freeze_bn()
 
     train_loader = datasets.fetch_dataloader(args)
@@ -170,9 +150,8 @@ def train(args):
     VAL_FREQ = len(train_loader) // args.eval_freq
 
     add_noise = False
-
     should_keep_training = True
-    import tqdm
+
     while should_keep_training:
 
         for i_batch, data_blob in tqdm.tqdm(enumerate(train_loader)):
@@ -188,8 +167,11 @@ def train(args):
             # flow_predictions = model(image1, image2, iters=args.iters)            
             flow_predictions = model(image2, image1, iters=args.iters)            
 
+            loss, metrics = sequence_loss(
+                flow_predictions, flow, gamma=args.gamma, 
+                l1_weight=args.l1_loss_weight, cos_weight=args.cosine_loss_weight
+            )
 
-            loss, metrics = sequence_loss(flow_predictions, flow, valid, gamma=args.gamma, cos_weight=args.cosine_loss_weight)
             scaler.scale(loss).backward()
             scaler.unscale_(optimizer)                
             torch.nn.utils.clip_grad_norm_(model.parameters(), args.clip)
@@ -200,19 +182,13 @@ def train(args):
 
             logger.push(metrics)
 
-            if total_steps % VAL_FREQ == VAL_FREQ - 1:
+            if total_steps % VAL_FREQ == 1:
                 PATH = f'checkpoints/{args.name}/{total_steps+1}_{args.name}.pth'
                 torch.save(model.state_dict(), PATH)
 
                 results = {}
                 for val_dataset in args.validation:
-                    if val_dataset == 'chairs':
-                        results.update(evaluate.validate_chairs(model.module))
-                    elif val_dataset == 'sintel':
-                        results.update(evaluate.validate_sintel(model.module))
-                    elif val_dataset == 'kitti':
-                        results.update(evaluate.validate_kitti(model.module))
-                    elif val_dataset == 'meta':
+                    if val_dataset == 'meta':
                         results.update(evaluate.validate_meta(model.module, args))
 
                 logger.write_dict(results)
