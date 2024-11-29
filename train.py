@@ -151,7 +151,7 @@ def train(args):
 
     add_noise = False
     should_keep_training = True
-
+    epoch = 0
     while should_keep_training:
 
         for i_batch, data_blob in tqdm.tqdm(enumerate(train_loader)):
@@ -198,10 +198,14 @@ def train(args):
                     model.module.freeze_bn()
             
             total_steps += 1
-
+            logger.write_dict(
+                {'lr': scheduler.get_last_lr()[0], 'steps': total_steps, 'epochs': epochs}
+            )
             if total_steps > args.num_steps:
                 should_keep_training = False
                 break
+        
+        epochs += 1
 
     logger.close()
     PATH = f'checkpoints/{args.name}/{args.name}.pth' 
