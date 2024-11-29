@@ -151,7 +151,7 @@ def train(args):
 
     add_noise = False
     should_keep_training = True
-    epoch = 0
+    epochs = 0
     while should_keep_training:
 
         for i_batch, data_blob in tqdm.tqdm(enumerate(train_loader)):
