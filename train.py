@@ -20,6 +20,7 @@ import evaluate
 import datasets
 
 from torch.utils.tensorboard import SummaryWriter
+import wandb
 
 try:
     from torch.cuda.amp import GradScaler
@@ -166,7 +167,8 @@ def train(args):
     scaler = GradScaler(enabled=args.mixed_precision)
     logger = Logger(model, scheduler, args)
 
-    VAL_FREQ = len(train_loader) // args.batch_size // 2
+    VAL_FREQ = len(train_loader) // args.eval_freq
+
     add_noise = False
 
     should_keep_training = True
@@ -198,7 +200,7 @@ def train(args):
 
             logger.push(metrics)
 
-            if total_steps % VAL_FREQ == VAL_FREQ - 1 or True:
+            if total_steps % VAL_FREQ == VAL_FREQ - 1:
                 PATH = f'checkpoints/{args.name}/{total_steps+1}_{args.name}.pth'
                 torch.save(model.state_dict(), PATH)
 
@@ -261,12 +263,9 @@ if __name__ == '__main__':
     parser.add_argument('--cosine_loss_weight', type=float, default=0.0)
     parser.add_argument('--l1_loss_weight', type=float, default=1.0)
 
-    
     args = parser.parse_args()
-
     torch.manual_seed(1234)
     np.random.seed(1234)
-
     if not os.path.isdir(f'checkpoints/{args.name}'):
         os.mkdir(f'checkpoints/{args.name}')
 
